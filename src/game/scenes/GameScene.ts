@@ -50,11 +50,37 @@ type KeyMap = Record<
   Phaser.Input.Keyboard.Key
 >;
 
+type TouchState = {
+  movePointerId: number | null;
+  moveActive: boolean;
+  moveVector: { x: number; y: number };
+  actionPointerId: number | null;
+  actionDown: boolean;
+  actionPressed: boolean;
+  secondaryPointerId: number | null;
+  secondaryDown: boolean;
+  secondaryPressed: boolean;
+  aimPointerId: number | null;
+  aimActive: boolean;
+  aimWorld: { x: number; y: number };
+  continuePressed: boolean;
+  restartPressed: boolean;
+  upgradePressedIndex: number | null;
+};
+
 const RESOURCE_ORDER: ResourceType[] = ['scrap', 'circuit', 'alloy'];
 const MAX_DROPS = 80;
 const MAX_ENEMIES = 80;
 const MAX_PROJECTILES = 120;
 const WALL_CHUNK_COUNT = 64;
+const TOUCH_UI = {
+  joystick: { x: 94, y: BALANCE.screenHeight - 92, radius: 58, knobRadius: 18, maxDistance: 44, deadZone: 8 },
+  action: { x: BALANCE.screenWidth - 88, y: BALANCE.screenHeight - 92, radius: 46 },
+  secondary: { x: BALANCE.screenWidth - 190, y: BALANCE.screenHeight - 92, radius: 34 },
+  continue: { x: 304, y: 408, width: 352, height: 42 },
+  restart: { x: 304, y: 286, width: 352, height: 46 },
+  upgrade: { x: 176, y: 148, width: 608, height: 38, gap: 44 },
+} as const;
 
 export class GameScene extends Phaser.Scene {
   private model!: GameModel;
@@ -87,6 +113,7 @@ export class GameScene extends Phaser.Scene {
   private debugVisible = false;
   private upgradeMessage = '';
   private upgradeMessageMs = 0;
+  private touch: TouchState = createTouchState();
   private dropSeq = 0;
   private enemySeq = 0;
   private projectileSeq = 0;
@@ -163,6 +190,7 @@ export class GameScene extends Phaser.Scene {
       Phaser.Input.Keyboard.KeyCodes.LEFT,
       Phaser.Input.Keyboard.KeyCodes.RIGHT,
     ]);
+    this.registerPointerInput();
 
     this.resetRun();
     window.render_game_to_text = () => this.renderGameToText();
@@ -225,6 +253,7 @@ export class GameScene extends Phaser.Scene {
     this.lateReturnMs = 0;
     this.upgradeMessage = '';
     this.upgradeMessageMs = 0;
+    this.touch = createTouchState();
     this.dropSeq = 0;
     this.enemySeq = 0;
     this.projectileSeq = 0;
@@ -248,7 +277,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     if (this.model.state === 'RUN_END') {
-      if (Phaser.Input.Keyboard.JustDown(this.keys.enter)) {
+      if (Phaser.Input.Keyboard.JustDown(this.keys.enter) || this.consumeRestartPressed()) {
         this.resetRun();
       }
       return;
@@ -288,13 +317,164 @@ export class GameScene extends Phaser.Scene {
         break;
     }
 
+    this.clearTransientTouchInput();
+
     if (this.model.base.hp <= 0) {
       this.enterRunEnd();
     }
   }
 
+  private registerPointerInput(): void {
+    this.input.addPointer(2);
+    this.input.on('pointerdown', this.handlePointerDown, this);
+    this.input.on('pointermove', this.handlePointerMove, this);
+    this.input.on('pointerup', this.handlePointerUp, this);
+    this.input.on('pointerupoutside', this.handlePointerUp, this);
+    this.input.on('pointercancel', this.handlePointerUp, this);
+  }
+
+  private handlePointerDown(pointer: Phaser.Input.Pointer): void {
+    const world = this.pointerWorldPosition(pointer);
+    const pointerId = this.pointerId(pointer);
+
+    if (this.model.state === 'UPGRADE') {
+      const upgradeIndex = this.hitUpgradeIndex(world.x, world.y);
+      if (upgradeIndex !== null) {
+        this.touch.upgradePressedIndex = upgradeIndex;
+        return;
+      }
+      if (this.hitRect(world.x, world.y, TOUCH_UI.continue)) {
+        this.touch.continuePressed = true;
+        return;
+      }
+    }
+
+    if (this.model.state === 'RUN_END') {
+      if (this.hitRect(world.x, world.y, TOUCH_UI.restart) || this.hitRect(world.x, world.y, { x: 260, y: 172, width: 440, height: 172 })) {
+        this.touch.restartPressed = true;
+      }
+      return;
+    }
+
+    if (
+      (this.model.state === 'WALL_TRAVEL' || this.model.state === 'MINING') &&
+      (this.hitCircle(world.x, world.y, TOUCH_UI.joystick.x, TOUCH_UI.joystick.y, TOUCH_UI.joystick.radius + 34) || world.x < 330)
+    ) {
+      this.touch.movePointerId = pointerId;
+      this.touch.moveActive = true;
+      this.updateTouchMove(world.x, world.y);
+      return;
+    }
+
+    if (this.model.state === 'MINING' && this.hitCircle(world.x, world.y, TOUCH_UI.secondary.x, TOUCH_UI.secondary.y, TOUCH_UI.secondary.radius)) {
+      this.touch.secondaryPointerId = pointerId;
+      this.touch.secondaryDown = true;
+      this.touch.secondaryPressed = true;
+      return;
+    }
+
+    if (
+      (this.model.state === 'WALL_TRAVEL' || this.model.state === 'MINING' || this.model.state === 'COMBAT') &&
+      this.hitCircle(world.x, world.y, TOUCH_UI.action.x, TOUCH_UI.action.y, TOUCH_UI.action.radius)
+    ) {
+      this.touch.actionPointerId = pointerId;
+      this.touch.actionDown = true;
+      this.touch.actionPressed = true;
+      return;
+    }
+
+    if (this.model.state === 'COMBAT' || this.model.state === 'MINING') {
+      this.touch.aimPointerId = pointerId;
+      this.touch.aimActive = true;
+      this.touch.aimWorld = world;
+      this.touch.actionPointerId = pointerId;
+      this.touch.actionDown = true;
+      this.touch.actionPressed = true;
+    }
+  }
+
+  private handlePointerMove(pointer: Phaser.Input.Pointer): void {
+    const pointerId = this.pointerId(pointer);
+    const world = this.pointerWorldPosition(pointer);
+    if (this.touch.movePointerId === pointerId) {
+      this.updateTouchMove(world.x, world.y);
+    }
+    if (this.touch.aimPointerId === pointerId) {
+      this.touch.aimWorld = world;
+    }
+  }
+
+  private handlePointerUp(pointer: Phaser.Input.Pointer): void {
+    const pointerId = this.pointerId(pointer);
+    if (this.touch.movePointerId === pointerId) {
+      this.touch.movePointerId = null;
+      this.touch.moveActive = false;
+      this.touch.moveVector = { x: 0, y: 0 };
+    }
+    if (this.touch.actionPointerId === pointerId) {
+      this.touch.actionPointerId = null;
+      this.touch.actionDown = false;
+    }
+    if (this.touch.secondaryPointerId === pointerId) {
+      this.touch.secondaryPointerId = null;
+      this.touch.secondaryDown = false;
+    }
+    if (this.touch.aimPointerId === pointerId) {
+      this.touch.aimPointerId = null;
+      this.touch.aimActive = false;
+    }
+  }
+
+  private updateTouchMove(worldX: number, worldY: number): void {
+    const dx = worldX - TOUCH_UI.joystick.x;
+    const dy = worldY - TOUCH_UI.joystick.y;
+    const length = Math.hypot(dx, dy);
+    if (length < TOUCH_UI.joystick.deadZone) {
+      this.touch.moveVector = { x: 0, y: 0 };
+      return;
+    }
+    const scale = Math.min(1, length / TOUCH_UI.joystick.maxDistance);
+    this.touch.moveVector = {
+      x: (dx / length) * scale,
+      y: (dy / length) * scale,
+    };
+  }
+
+  private consumeActionPressed(): boolean {
+    const pressed = this.touch.actionPressed;
+    this.touch.actionPressed = false;
+    return pressed;
+  }
+
+  private consumeSecondaryPressed(): boolean {
+    const pressed = this.touch.secondaryPressed;
+    this.touch.secondaryPressed = false;
+    return pressed;
+  }
+
+  private consumeContinuePressed(): boolean {
+    const pressed = this.touch.continuePressed;
+    this.touch.continuePressed = false;
+    return pressed;
+  }
+
+  private consumeRestartPressed(): boolean {
+    const pressed = this.touch.restartPressed;
+    this.touch.restartPressed = false;
+    return pressed;
+  }
+
+  private clearTransientTouchInput(): void {
+    this.touch.actionPressed = false;
+    this.touch.secondaryPressed = false;
+    this.touch.continuePressed = false;
+    this.touch.restartPressed = false;
+    this.touch.upgradePressedIndex = null;
+  }
+
   private updateWallTravel(dtMs: number): void {
-    const dir = boolToAxis(this.keys.s.isDown || this.cursors.down.isDown, this.keys.w.isDown || this.cursors.up.isDown);
+    const keyboardDir = boolToAxis(this.keys.s.isDown || this.cursors.down.isDown, this.keys.w.isDown || this.cursors.up.isDown);
+    const dir = keyboardDir !== 0 ? keyboardDir : this.touch.moveVector.y;
     this.model.base.wallY = clamp(
       this.model.base.wallY + dir * this.model.base.moveSpeed * (dtMs / 1000),
       80,
@@ -302,7 +482,8 @@ export class GameScene extends Phaser.Scene {
     );
 
     const entrance = this.getNearestEntrance();
-    const confirmsEntry = Phaser.Input.Keyboard.JustDown(this.keys.e) || Phaser.Input.Keyboard.JustDown(this.keys.space);
+    const confirmsEntry =
+      Phaser.Input.Keyboard.JustDown(this.keys.e) || Phaser.Input.Keyboard.JustDown(this.keys.space) || this.consumeActionPressed();
     if (entrance && Math.abs(this.model.base.wallY - entrance.wallY) < 30 && confirmsEntry) {
       this.enterMine(entrance);
     }
@@ -314,8 +495,10 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    const horizontal = boolToAxis(this.keys.d.isDown || this.cursors.right.isDown, this.keys.a.isDown || this.cursors.left.isDown);
-    const vertical = boolToAxis(this.keys.s.isDown || this.cursors.down.isDown, this.keys.w.isDown || this.cursors.up.isDown);
+    const keyboardHorizontal = boolToAxis(this.keys.d.isDown || this.cursors.right.isDown, this.keys.a.isDown || this.cursors.left.isDown);
+    const keyboardVertical = boolToAxis(this.keys.s.isDown || this.cursors.down.isDown, this.keys.w.isDown || this.cursors.up.isDown);
+    const horizontal = keyboardHorizontal !== 0 ? keyboardHorizontal : this.touch.moveVector.x;
+    const vertical = keyboardVertical !== 0 ? keyboardVertical : this.touch.moveVector.y;
     const move = normalize(horizontal, vertical);
     const wantsMove = horizontal !== 0 || vertical !== 0;
     if (wantsMove) {
@@ -329,7 +512,7 @@ export class GameScene extends Phaser.Scene {
       this.movePlayer(0, move.y * amount);
     }
 
-    if ((this.keys.space.isDown || this.input.activePointer.isDown) && this.drillCooldownMs <= 0) {
+    if ((this.keys.space.isDown || this.touch.actionDown || this.touch.actionPressed) && this.drillCooldownMs <= 0) {
       this.drill();
     }
 
@@ -337,7 +520,10 @@ export class GameScene extends Phaser.Scene {
     this.depositCargoIfAtEntrance();
 
     const entrance = tileToWorld(this.currentMine.entrance.x, this.currentMine.entrance.y);
-    if (distance(this.model.player.x, this.model.player.y, entrance.x, entrance.y) < 34 && Phaser.Input.Keyboard.JustDown(this.keys.r)) {
+    if (
+      distance(this.model.player.x, this.model.player.y, entrance.x, entrance.y) < 34 &&
+      (Phaser.Input.Keyboard.JustDown(this.keys.r) || this.consumeSecondaryPressed())
+    ) {
       this.depositCargo();
       this.model.state = 'WALL_TRAVEL';
       this.model.currentMineId = null;
@@ -358,7 +544,7 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    if (this.lateReturnMs <= 0 && (this.input.activePointer.isDown || this.keys.space.isDown) && this.turretCooldownMs <= 0) {
+    if (this.lateReturnMs <= 0 && (this.touch.actionDown || this.touch.actionPressed || this.keys.space.isDown) && this.turretCooldownMs <= 0) {
       this.fireTurret();
     }
 
@@ -408,10 +594,16 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
+    if (this.touch.upgradePressedIndex !== null) {
+      this.tryBuyUpgrade(this.touch.upgradePressedIndex);
+      this.touch.upgradePressedIndex = null;
+    }
+
     if (
       Phaser.Input.Keyboard.JustDown(this.keys.enter) ||
       Phaser.Input.Keyboard.JustDown(this.keys.esc) ||
-      Phaser.Input.Keyboard.JustDown(this.keys.c)
+      Phaser.Input.Keyboard.JustDown(this.keys.c) ||
+      this.consumeContinuePressed()
     ) {
       this.model.state = 'WALL_TRAVEL';
       this.model.currentMineId = null;
@@ -535,6 +727,13 @@ export class GameScene extends Phaser.Scene {
     if (this.canOccupy(nextX, nextY)) {
       this.model.player.x = nextX;
       this.model.player.y = nextY;
+      return;
+    }
+
+    const blockedDirection = directionFromDelta(dx, dy);
+    if (blockedDirection) {
+      this.model.player.facing = blockedDirection;
+      this.drillInDirection(blockedDirection, false);
     }
   }
 
@@ -565,15 +764,25 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    if (this.input.activePointer.isDown) {
+    if (this.touch.aimActive) {
       this.model.player.facing = this.directionFromPointer(this.model.player.x, this.model.player.y);
     }
 
+    this.drillInDirection(this.model.player.facing, true);
+  }
+
+  private drillInDirection(direction: Direction, cooldownOnMiss: boolean): boolean {
+    if (!this.currentMine || this.drillCooldownMs > 0) {
+      return false;
+    }
+
     const { tx, ty } = worldToTile(this.model.player.x, this.model.player.y);
-    const target = targetFromDirection(tx, ty, this.model.player.facing);
+    const target = targetFromDirection(tx, ty, direction);
     if (target.tx < 0 || target.ty < 0 || target.tx >= this.currentMine.width || target.ty >= this.currentMine.height) {
-      this.drillCooldownMs = this.model.player.drillCooldownMs;
-      return;
+      if (cooldownOnMiss) {
+        this.drillCooldownMs = this.model.player.drillCooldownMs;
+      }
+      return false;
     }
 
     const tile = this.currentMine.tiles[target.ty][target.tx];
@@ -582,8 +791,13 @@ export class GameScene extends Phaser.Scene {
       if (tile.hp <= 0) {
         this.destroyTile(target.tx, target.ty, tile);
       }
+      this.drillCooldownMs = this.model.player.drillCooldownMs;
+      return true;
     }
-    this.drillCooldownMs = this.model.player.drillCooldownMs;
+    if (cooldownOnMiss) {
+      this.drillCooldownMs = this.model.player.drillCooldownMs;
+    }
+    return false;
   }
 
   private destroyTile(tx: number, ty: number, tile: TileModel): void {
@@ -681,7 +895,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private fireTurret(): void {
-    const pointer = this.pointerWorldPosition();
+    const pointer = this.aimWorldPosition();
     const dir = normalize(pointer.x - BALANCE.combatTruckX, pointer.y - BALANCE.combatTruckY);
     this.projectiles.push({
       id: `projectile-${this.projectileSeq++}`,
@@ -780,7 +994,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private directionFromPointer(x: number, y: number): Direction {
-    const pointer = this.pointerWorldPosition();
+    const pointer = this.aimWorldPosition();
     const dx = pointer.x - x;
     const dy = pointer.y - y;
     if (Math.abs(dx) > Math.abs(dy)) {
@@ -830,12 +1044,46 @@ export class GameScene extends Phaser.Scene {
     return new Phaser.Geom.Rectangle(camera.scrollX, camera.scrollY, width, height);
   }
 
-  private pointerWorldPosition(): { x: number; y: number } {
-    const pointer = this.input.activePointer;
+  private pointerWorldPosition(pointer = this.input.activePointer): { x: number; y: number } {
+    pointer.updateWorldPoint(this.cameras.main);
     return {
       x: Number.isFinite(pointer.worldX) ? pointer.worldX : pointer.x,
       y: Number.isFinite(pointer.worldY) ? pointer.worldY : pointer.y,
     };
+  }
+
+  private aimWorldPosition(): { x: number; y: number } {
+    if (this.touch.aimActive || this.touch.actionDown) {
+      return this.touch.aimWorld;
+    }
+    return this.pointerWorldPosition();
+  }
+
+  private pointerId(pointer: Phaser.Input.Pointer): number {
+    return pointer.pointerId || pointer.id;
+  }
+
+  private hitCircle(x: number, y: number, cx: number, cy: number, radius: number): boolean {
+    return distance(x, y, cx, cy) <= radius;
+  }
+
+  private hitRect(x: number, y: number, rect: { x: number; y: number; width: number; height: number }): boolean {
+    return x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
+  }
+
+  private hitUpgradeIndex(x: number, y: number): number | null {
+    for (let i = 0; i < UPGRADE_DEFINITIONS.length; i += 1) {
+      const rect = {
+        x: TOUCH_UI.upgrade.x,
+        y: TOUCH_UI.upgrade.y + i * TOUCH_UI.upgrade.gap,
+        width: TOUCH_UI.upgrade.width,
+        height: TOUCH_UI.upgrade.height,
+      };
+      if (this.hitRect(x, y, rect)) {
+        return i;
+      }
+    }
+    return null;
   }
 
   private createPixelSpriteLayers(): void {
@@ -919,6 +1167,7 @@ export class GameScene extends Phaser.Scene {
         break;
     }
 
+    this.drawTouchControls();
     this.drawHud();
     this.drawDebug();
   }
@@ -971,7 +1220,7 @@ export class GameScene extends Phaser.Scene {
       nearest && Math.abs(this.model.base.wallY - nearest.wallY) < 30
         ? `Entrance ${nearest.label} ready - press E or Space`
         : 'Move along the scrap wall to align with an entrance';
-    this.helpText.setText(`W/S or arrows: move   ${prompt}   F: fullscreen`);
+    this.helpText.setText(`W/S/arrows or touch stick: move   ${prompt}   tap action: enter   F: fullscreen`);
   }
 
   private showWallChunk(index: number, x: number, y: number, width: number, height: number): number {
@@ -1045,7 +1294,7 @@ export class GameScene extends Phaser.Scene {
     this.playerImage.setVisible(true);
 
     this.helpText.setText(
-      'WASD/arrows: move   Space/click: drill   return to green entrance to deposit   R near entrance: exit',
+      'WASD/arrows or touch stick: move   push into blocks to drill   R/green touch button near entrance: exit',
     );
   }
 
@@ -1080,7 +1329,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.showTruck(this.combatTruckImage, BALANCE.combatTruckX, BALANCE.combatTruckY);
-    const pointer = this.pointerWorldPosition();
+    const pointer = this.aimWorldPosition();
     const aim = normalize(pointer.x - BALANCE.combatTruckX, pointer.y - BALANCE.combatTruckY);
     this.turretBarrelImage.setPosition(BALANCE.combatTruckX, BALANCE.combatTruckY - 2);
     this.turretBarrelImage.setDisplaySize(48, 15);
@@ -1097,7 +1346,7 @@ export class GameScene extends Phaser.Scene {
       this.panelText.setColor(COLORS.text);
     }
 
-    this.helpText.setText('Mouse: aim   click/Space: fire   clear all enemies to upgrade');
+    this.helpText.setText('Mouse/touch: aim + fire   Space/action: fire   clear all enemies to upgrade');
   }
 
   private drawUpgrade(): void {
@@ -1125,7 +1374,7 @@ export class GameScene extends Phaser.Scene {
     this.panelText.setColor(this.upgradeMessage.startsWith('!') && this.upgradeMessageMs > 0 ? COLORS.dangerText : COLORS.text);
     this.panelText.setPosition(190, 116);
     this.panelText.setText(lines.join('\n'));
-    this.helpText.setText('1-5: buy upgrade   continue when ready');
+    this.helpText.setText('1-5 or tap rows: buy upgrade   Enter/Esc/C or tap bottom: continue');
   }
 
   private drawRunEnd(): void {
@@ -1147,7 +1396,82 @@ export class GameScene extends Phaser.Scene {
         'Press Enter to restart',
       ].join('\n'),
     );
-    this.helpText.setText('Enter: restart');
+    this.helpText.setText('Enter or tap panel: restart');
+  }
+
+  private drawTouchControls(): void {
+    if (this.model.state === 'WALL_TRAVEL' || this.model.state === 'MINING') {
+      this.drawJoystick();
+    }
+
+    if (this.model.state === 'WALL_TRAVEL' || this.model.state === 'MINING' || this.model.state === 'COMBAT') {
+      this.drawTouchButton(TOUCH_UI.action.x, TOUCH_UI.action.y, TOUCH_UI.action.radius, this.touch.actionDown, 0xf5c84b);
+      if (this.model.state === 'WALL_TRAVEL') {
+        this.overlayGraphics.fillStyle(0xf5c84b, 0.88);
+        this.overlayGraphics.fillTriangle(TOUCH_UI.action.x - 10, TOUCH_UI.action.y - 16, TOUCH_UI.action.x - 10, TOUCH_UI.action.y + 16, TOUCH_UI.action.x + 16, TOUCH_UI.action.y);
+      } else if (this.model.state === 'MINING') {
+        this.overlayGraphics.lineStyle(4, 0xf5c84b, 0.9);
+        this.overlayGraphics.lineBetween(TOUCH_UI.action.x - 16, TOUCH_UI.action.y + 14, TOUCH_UI.action.x + 16, TOUCH_UI.action.y - 14);
+        this.overlayGraphics.lineBetween(TOUCH_UI.action.x - 4, TOUCH_UI.action.y - 18, TOUCH_UI.action.x + 18, TOUCH_UI.action.y + 4);
+      } else {
+        this.overlayGraphics.lineStyle(3, 0xf5c84b, 0.9);
+        this.overlayGraphics.strokeCircle(TOUCH_UI.action.x, TOUCH_UI.action.y, 16);
+        this.overlayGraphics.lineBetween(TOUCH_UI.action.x - 24, TOUCH_UI.action.y, TOUCH_UI.action.x + 24, TOUCH_UI.action.y);
+        this.overlayGraphics.lineBetween(TOUCH_UI.action.x, TOUCH_UI.action.y - 24, TOUCH_UI.action.x, TOUCH_UI.action.y + 24);
+      }
+    }
+
+    if (this.model.state === 'MINING') {
+      this.drawTouchButton(TOUCH_UI.secondary.x, TOUCH_UI.secondary.y, TOUCH_UI.secondary.radius, this.touch.secondaryDown, 0x7cc47f);
+      this.overlayGraphics.lineStyle(4, 0x7cc47f, 0.9);
+      this.overlayGraphics.lineBetween(TOUCH_UI.secondary.x + 14, TOUCH_UI.secondary.y, TOUCH_UI.secondary.x - 12, TOUCH_UI.secondary.y);
+      this.overlayGraphics.lineBetween(TOUCH_UI.secondary.x - 12, TOUCH_UI.secondary.y, TOUCH_UI.secondary.x, TOUCH_UI.secondary.y - 12);
+      this.overlayGraphics.lineBetween(TOUCH_UI.secondary.x - 12, TOUCH_UI.secondary.y, TOUCH_UI.secondary.x, TOUCH_UI.secondary.y + 12);
+    }
+
+    if (this.model.state === 'UPGRADE') {
+      for (let i = 0; i < UPGRADE_DEFINITIONS.length; i += 1) {
+        const rect = {
+          x: TOUCH_UI.upgrade.x,
+          y: TOUCH_UI.upgrade.y + i * TOUCH_UI.upgrade.gap,
+          width: TOUCH_UI.upgrade.width,
+          height: TOUCH_UI.upgrade.height,
+        };
+        this.overlayGraphics.fillStyle(0xf5c84b, 0.08);
+        this.overlayGraphics.fillRect(rect.x, rect.y, rect.width, rect.height);
+        this.overlayGraphics.lineStyle(1, 0xf5c84b, 0.25);
+        this.overlayGraphics.strokeRect(rect.x, rect.y, rect.width, rect.height);
+      }
+      this.overlayGraphics.fillStyle(0x7cc47f, 0.12);
+      this.overlayGraphics.fillRect(TOUCH_UI.continue.x, TOUCH_UI.continue.y, TOUCH_UI.continue.width, TOUCH_UI.continue.height);
+      this.overlayGraphics.lineStyle(2, 0x7cc47f, 0.45);
+      this.overlayGraphics.strokeRect(TOUCH_UI.continue.x, TOUCH_UI.continue.y, TOUCH_UI.continue.width, TOUCH_UI.continue.height);
+    }
+
+    if (this.model.state === 'RUN_END') {
+      this.overlayGraphics.fillStyle(0xf5c84b, 0.14);
+      this.overlayGraphics.fillRect(TOUCH_UI.restart.x, TOUCH_UI.restart.y, TOUCH_UI.restart.width, TOUCH_UI.restart.height);
+      this.overlayGraphics.lineStyle(2, 0xf5c84b, 0.55);
+      this.overlayGraphics.strokeRect(TOUCH_UI.restart.x, TOUCH_UI.restart.y, TOUCH_UI.restart.width, TOUCH_UI.restart.height);
+    }
+  }
+
+  private drawJoystick(): void {
+    const knobX = TOUCH_UI.joystick.x + this.touch.moveVector.x * TOUCH_UI.joystick.maxDistance;
+    const knobY = TOUCH_UI.joystick.y + this.touch.moveVector.y * TOUCH_UI.joystick.maxDistance;
+    this.overlayGraphics.fillStyle(0x000000, this.touch.moveActive ? 0.36 : 0.24);
+    this.overlayGraphics.fillCircle(TOUCH_UI.joystick.x, TOUCH_UI.joystick.y, TOUCH_UI.joystick.radius);
+    this.overlayGraphics.lineStyle(2, 0x9aa6b2, 0.46);
+    this.overlayGraphics.strokeCircle(TOUCH_UI.joystick.x, TOUCH_UI.joystick.y, TOUCH_UI.joystick.radius);
+    this.overlayGraphics.fillStyle(0xe8edf2, this.touch.moveActive ? 0.72 : 0.42);
+    this.overlayGraphics.fillCircle(knobX, knobY, TOUCH_UI.joystick.knobRadius);
+  }
+
+  private drawTouchButton(x: number, y: number, radius: number, active: boolean, color: number): void {
+    this.overlayGraphics.fillStyle(0x000000, active ? 0.44 : 0.28);
+    this.overlayGraphics.fillCircle(x, y, radius);
+    this.overlayGraphics.lineStyle(2, color, active ? 0.84 : 0.5);
+    this.overlayGraphics.strokeCircle(x, y, radius);
   }
 
   private drawHud(): void {
@@ -1279,6 +1603,26 @@ function emptyInventory(): Inventory {
   return { scrap: 0, circuit: 0, alloy: 0 };
 }
 
+function createTouchState(): TouchState {
+  return {
+    movePointerId: null,
+    moveActive: false,
+    moveVector: { x: 0, y: 0 },
+    actionPointerId: null,
+    actionDown: false,
+    actionPressed: false,
+    secondaryPointerId: null,
+    secondaryDown: false,
+    secondaryPressed: false,
+    aimPointerId: null,
+    aimActive: false,
+    aimWorld: { x: 120, y: BALANCE.combatTruckY },
+    continuePressed: false,
+    restartPressed: false,
+    upgradePressedIndex: null,
+  };
+}
+
 function boolToAxis(positive: boolean, negative: boolean): number {
   if (positive === negative) {
     return 0;
@@ -1358,6 +1702,16 @@ function facingVector(direction: Direction): { x: number; y: number } {
     default:
       return { x: 1, y: 0 };
   }
+}
+
+function directionFromDelta(dx: number, dy: number): Direction | null {
+  if (dx === 0 && dy === 0) {
+    return null;
+  }
+  if (Math.abs(dx) > Math.abs(dy)) {
+    return dx > 0 ? 'right' : 'left';
+  }
+  return dy > 0 ? 'down' : 'up';
 }
 
 function cargoTotal(inventory: Inventory): number {

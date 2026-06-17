@@ -81,3 +81,20 @@ Original prompt: docs에 md파일보고 개발진행해줘
   - Playwright viewport `932x430`: canvas CSS and buffer both exactly `932x430`; screenshot `output/playwright/mobile-landscape-932x430.png`.
   - Required web-game client passed after resize changes; screenshot `output/web-game-responsive/shot-0.png`.
   - Browser console errors: 0.
+
+## 2026-06-18 Mobile Touch Controls And Push Mining
+
+- User requested that every action work on mobile touch and that blocks break by pushing into them, without requiring the attack/drill button.
+- Added multi-pointer touch handling in `GameScene`:
+  - Left virtual joystick for wall travel and mining movement.
+  - Right action button for mine entry, manual drill, and combat fire.
+  - Mining return button that exits near the entrance.
+  - Tappable upgrade rows, continue area, and run-end restart area.
+  - Field touch in mining/combat acts as aim + action.
+- Changed mining collision behavior so failed movement into a solid tile calls the drill logic in the pushed direction, respecting the existing drill cooldown and drill power.
+- Verification:
+  - `npm run build` passed.
+  - Required web-game client passed after the change; `output/web-game-touch-push-final/state-0.json` shows movement-only mining reached tile `tx=5` and collected `cargo.scrap=3`.
+  - Mobile landscape Playwright flow at `844x390` verified touch mine entry, joystick push mining, touch exit near entrance, and combat field touch fire.
+  - Screenshots: `output/playwright/mobile-touch-mining.png`, `output/playwright/mobile-touch-combat.png`, `output/playwright/mobile-touch-exit.png`.
+  - Browser console errors: 0.
