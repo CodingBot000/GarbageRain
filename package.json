@@ -1,0 +1,19 @@
+{
+  "name": "garbage-rain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 35175 --strictPort",
+    "assets:pixel": "bash scripts/extract-generated-sheet-assets.sh",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 45175 --strictPort"
+  },
+  "dependencies": {
+    "phaser": "^3.90.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  }
+}
