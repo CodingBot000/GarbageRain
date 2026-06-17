@@ -98,3 +98,9 @@ Original prompt: docs에 md파일보고 개발진행해줘
   - Mobile landscape Playwright flow at `844x390` verified touch mine entry, joystick push mining, touch exit near entrance, and combat field touch fire.
   - Screenshots: `output/playwright/mobile-touch-mining.png`, `output/playwright/mobile-touch-combat.png`, `output/playwright/mobile-touch-exit.png`.
   - Browser console errors: 0.
+- Git:
+  - Committed and pushed `716760d Add mobile touch controls` to `origin/main`.
+- Vercel:
+  - `vercel pull --yes --environment=production` and `vercel build --prod` succeeded.
+  - Direct and prebuilt production deployments were created, but Vercel reports the latest deployment `dpl_AfVassXam6JV5Mcd4B6jTQHbW2Cn` as `readyState: BLOCKED`.
+  - The build inside that deployment is `READY`, but promotion fails because the deployment is not ready; public `https://garbage-rain.vercel.app` still points to the previous bundle.
